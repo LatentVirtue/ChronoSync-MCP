@@ -1,0 +1,83 @@
+PROJECT SUMMARY
+`chronosync-mcp` is a reusable pipeline and MCP skill for synchronizing, auditing, and validating messy, asynchronous multi-device sensor time-series streams against sparse or continuous reference ("gold-standard") measurements.
+Given 2+ unaligned time-series CSV/Parquet files with irregular sampling rates, clock skew/lag, missing dropout gaps, and sensor drift, `chronosync-mcp`:
+1. Profiles jitter, sampling rates, and dropout windows.
+2. Estimates and corrects inter-device clock lag via cross-correlation.
+3. Harmonizes streams onto a clean target time grid with strict `max_interpolation_gap` guards (preventing hallucinated values across long hardware dropouts).
+4. Audits sensor reliability against a reference stream (Bland-Altman bias & limits of agreement, Lin's Concordance Correlation Coefficient, rolling error drift, and anomaly window detection).
+5. Outputs Dual Artifacts: a compact `<2,000`-token `manifest.json` for LLM agents, an interactive synchronized multi-track Plotly `report.html` for humans, and ML-ready harmonized `.parquet` datasets.
+
+TECH STACK & DEPENDENCIES
+- Python >= 3.11, managed via `pyproject.toml`.
+- Core Data/Signal: `numpy`, `pandas`, `pyarrow`, `scipy`.
+- Schemas & CLI: `pydantic>=2.0`, `pyyaml`, `typer`.
+- Visualization: `plotly`, `jinja2`.
+- MCP Server: `mcp[cli]>=1.3.0` (`from mcp.server.fastmcp import FastMCP`).
+- Dev/Testing: `pytest`.
+
+REPOSITORY ARCHITECTURE
+chronosync-mcp/
+├── LICENSE                         # Standard Apache-2.0 text
+├── NOTICE                          # Attribution notice for Aleksandar Jovanović (2026)
+├── README.md                       # Clear documentation, architecture, CLI & MCP setup, demo guide
+├── pyproject.toml                  # Entrypoints: `chronosync` (CLI) and `chronosync-mcp` (MCP server)
+├── src/
+│   └── chronosync/
+│       ├── __init__.py
+│       ├── engine/                 # ZERO imports from `mcp` allowed here
+│       │   ├── config.py           # Pydantic v2 models: StreamSpec, SyncConfig, ReliabilityMetrics, AuditManifest
+│       │   ├── profiler.py         # Sampling frequency stats, timestamp monotonicity/duplicates, gap/dropout inventory
+│       │   ├── alignment.py        # Clock-lag estimation via normalized cross-correlation, resampling, gap-guarded interpolation, tolerance-based asof matching
+│       │   ├── reliability.py      # Bland-Altman (mean bias, +/- 1.96 SD LoA), RMSE, MAE, Pearson r, Lin's CCC, rolling drift slope (OLS/Theil-Sen), disagreement spike windows
+│       │   └── synthetic.py        # Generates realistic 3-stream benchmark: (1) high-rate noisy wearable/PAT sensor at ~10 Hz with 2 long dropouts, 14-second clock lag, and gradual linear drift; (2) medium-rate auxiliary sensor at 1 Hz; (3) sparse gold-standard reference stream every 60 seconds
+│       ├── reporting/
+│       │   ├── manifest.py         # Compact JSON summary (<2,000 tokens) for LLM interpretation
+│       │   └── html_report.py      # Standalone Plotly interactive HTML dashboard
+│       ├── cli.py                  # Typer CLI: `inspect`, `harmonize`, `generate-demo`, `query-anomalies`
+│       └── mcp_server.py           # FastMCP server exposing tools and resources
+├── examples/
+│   └── demo_run/                   # Generated synthetic streams + harmonized output + HTML report + manifest
+└── tests/
+    ├── test_clock_lag_recovery.py
+    ├── test_gap_guarded_resampling.py
+    ├── test_bland_altman_and_drift.py
+    └── test_mcp_tools.py
+
+CORE FUNCTIONAL REQUIREMENTS
+
+1. Stream Profiler (`profiler.py`):
+   - Parses ISO-8601 or numeric epoch timestamps.
+   - Detects duplicate timestamps, out-of-order rows, effective median Hz, sampling jitter (IQR of dt), overlapping time bounds across streams, and lists all dropout intervals exceeding a configurable threshold.
+
+2. Gap-Guarded Harmonization & Lag Correction (`alignment.py`):
+   - Estimates constant time offset/lag (in seconds) between candidate streams and a reference signal over a fine grid using cross-correlation, optionally shifting timestamps before alignment.
+   - Aligns continuous streams onto a regular target grid (e.g., `1s` or `10s`) using linear/cubic/time interpolation ONLY across gaps `<= max_gap_seconds`. Any gap `> max_gap_seconds` MUST remain `NaN` and be marked with a boolean mask column `<stream>_is_dropout = True`.
+   - Also produces a paired reference-evaluation table (`paired_reference.parquet`) using `merge_asof` within a strict time tolerance around sparse gold-standard reference points.
+
+3. Reliability & Drift Auditor (`reliability.py`):
+   - On paired valid points against the reference stream, calculates:
+     * Sample count `n_matched`, coverage %, `MAE`, `RMSE`, `Pearson_r`, and `Lins_CCC` (Concordance Correlation Coefficient).
+     * Bland-Altman statistics: `mean_bias`, `sd_diff`, `loa_lower` (`bias - 1.96*sd`), `loa_upper` (`bias + 1.96*sd`), and % of points outside LoA.
+     * Temporal sensor drift: fits error `(candidate - reference)` vs. elapsed hours to quantify `drift_per_hour` and p-value, flagging statistically significant calibration drift.
+     * Contiguous anomaly/disagreement windows where `|error|` exceeds `loa` or a user threshold.
+
+4. Dual-Artifact Reporting (`reporting/`):
+   - `manifest.json`: Compact Pydantic JSON digest containing stream diagnostics, recovered clock offsets, dropout coverage stats, Bland-Altman/CCC scorecard, drift rates, top 5 worst disagreement time windows, and file paths to `harmonized.parquet` and `report.html`.
+   - `report.html`: Interactive single-file Plotly HTML report featuring:
+     a) Synchronized Multi-Track Time-Series Plot (shared zoomable X-axis showing raw sparse reference markers, aligned sensor traces, and shaded red rectangles over hardware dropout intervals).
+     b) Cross-Correlation Lag Curve showing the detected clock skew peak.
+     c) Interactive Bland-Altman Plot (mean vs. difference with horizontal dashed lines for Mean Bias and +/- 1.96 SD Limits of Agreement).
+     d) Temporal Error Drift Plot (rolling error over time + trendline).
+     e) Scorecard Table & Anomaly Windows Log.
+
+5. MCP Server (`mcp_server.py`):
+   Expose via `FastMCP("chronosync")`:
+   - Tool `inspect_sensor_streams(stream_paths: list[str], timestamp_col: str = "timestamp") -> dict`
+   - Tool `harmonize_and_audit_streams(candidate_paths: list[str], reference_path: str, target_freq: str = "1s", max_gap_seconds: float = 30.0, auto_correct_lag: bool = True, output_dir: str = "runs") -> dict`
+   - Tool `query_disagreement_windows(run_id: str, top_k: int = 10, output_dir: str = "runs") -> dict`
+   - Resource `chronosync://runs/{run_id}/manifest`
+
+DEFINITION OF DONE & AUTONOMOUS VERIFICATION
+1. Install package with dev dependencies and run `pytest -v`. Include a test proving that `alignment.py` accurately recovers the injected synthetic 14-second clock lag within +/- 0.5s and leaves `NaN` inside long dropouts.
+2. Run the CLI demo into `examples/demo_run/` and verify `manifest.json`, `report.html`, `harmonized.parquet`, and `paired_reference.parquet` are created cleanly.
+3. Confirm `engine/` has zero imports from `mcp`.

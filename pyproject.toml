@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chronosync-mcp"
+version = "0.1.0"
+description = "Synchronize, harmonize, and audit asynchronous multi-device sensor time-series streams against sparse gold-standard references."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+authors = [{ name = "Aleksandar Jovanović" }]
+keywords = ["mcp", "time-series", "sensor-fusion", "clock-drift", "bland-altman", "signal-alignment"]
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyarrow>=14",
+    "scipy>=1.11",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "plotly>=5.20",
+    "jinja2>=3.1",
+    "mcp[cli]>=1.3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+chronosync = "chronosync.cli:app"
+chronosync-mcp = "chronosync.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chronosync"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
